@@ -60,6 +60,7 @@
     "dev": "tsup src/index.ts src/core.ts src/node.ts --format cjs,esm --dts --watch",
     "lint": "eslint src",
     "pretest": "node scripts/download-skill-fixtures.mjs",
+    "type-check": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest"
   },
