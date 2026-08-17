@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { ComputedRef, Ref } from 'vue'
 import type { AsyncStreamableResult, ChatMessage, MaybePromise, ToolCall } from '../../types'
-import type { PluginCommandResult } from '../../message/types'
+import type { MessagePersistenceState, PluginCommandResult } from '../../message/types'
 
 export interface Tool {
   type: 'function'
@@ -85,6 +85,8 @@ export type ResponseProvider<T = ChatCompletion> = (
 
 export interface UseMessageOptions {
   initialMessages?: ChatMessage[]
+  initialRequestState?: RequestState
+  initialCustomContext?: Record<string, unknown>
   /**
    * 请求消息时，要包含的字段（白名单）。默认包含所有字段。
    * 如果 `requestMessageFieldsExclude` 存在，会先取 `requestMessageFields` 中的字段，再排除 `requestMessageFieldsExclude` 中的字段
@@ -118,6 +120,7 @@ export interface UseMessageReturn {
   messages: Ref<ChatMessage[]>
   responseProvider: Ref<UseMessageOptions['responseProvider']>
   isProcessing: ComputedRef<boolean>
+  getPersistenceState: () => MessagePersistenceState
   sendMessage: (content: string) => Promise<void>
   send: (...msgs: ChatMessage[]) => Promise<void>
   abortRequest: () => Promise<void>

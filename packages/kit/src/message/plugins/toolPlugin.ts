@@ -9,10 +9,14 @@ import type { MaybePromise, MaybeStreamableResult } from '../../types'
 import type { BasePluginContext, ChatMessage, MessageEnginePlugin, MutateMessageStateFn } from '../types'
 import { combineDeltaData, normalizeToAsyncGenerator } from '../utils'
 
+export { findPendingToolCalls } from '../toolCallState'
+export type { PendingToolCall } from '../toolCallState'
+
 type AssistantMessageWithState = ChatMessage<
   Record<string, unknown>,
   { toolCall?: Record<string, Record<string, unknown>> }
 >
+type ToolMessage = Extract<ChatMessage, { role: 'tool' }>
 
 export type ToolSource = { type: 'toolPlugin' } | { type: 'toolProvider'; pluginName?: string } | { type: 'unknown' }
 
@@ -198,6 +202,7 @@ export const toolPlugin = (
      * 当工具调用执行失败（抛错或拒绝）时使用的消息内容。
      */
     toolCallFailedContent?: string
+    toolCallDeniedContent?: string
     /**
      * 是否在请求前自动补充缺失的 tool 消息。
      * 当 assistant 响应了 tool_calls 但未追加对应的 tool 消息时，
@@ -215,6 +220,7 @@ export const toolPlugin = (
     shouldPauseToolCall,
     toolCallCancelledContent = 'Tool call cancelled.',
     toolCallFailedContent = 'Tool call failed.',
+    toolCallDeniedContent = 'Tool call denied.',
     autoFillMissingToolMessages = false,
     ...restOptions
   } = options
@@ -347,14 +353,23 @@ export const toolPlugin = (
     return { tools, runtimeToolMap, toolSourceMap }
   }
 
-  const processToolCall = async (toolCall: ChatCompletionMessageToolCall, contextWithToolMessage: ToolCallContext) => {
+  const processToolCall = async (
+    toolCall: ChatCompletionMessageToolCall,
+    contextWithToolMessage: ToolCallContext,
+    runtimeToolMap: Map<string, RuntimeTool> = new Map(),
+  ) => {
     const { toolMessage: _toolMessage, abortSignal, mutate } = contextWithToolMessage
     const toolMessage = _toolMessage as Extract<ChatMessage, { role: 'tool' }>
     let hasMeaningfulResult = false
 
     toolCallStart(toolCall, contextWithToolMessage)
     try {
-      const result = callTool(toolCall, contextWithToolMessage)
+      const functionToolCall = isFunctionToolCall(toolCall) ? toolCall : undefined
+      const runtimeTool = functionToolCall ? runtimeToolMap.get(functionToolCall.function.name) : undefined
+      const result =
+        runtimeTool && functionToolCall
+          ? runtimeTool.handler(functionToolCall, contextWithToolMessage)
+          : callTool(toolCall, contextWithToolMessage)
 
       // 将 Promise 或异步迭代器统一转换为异步生成器
       const iterator = normalizeToAsyncGenerator(result)
@@ -451,13 +466,13 @@ export const toolPlugin = (
 
     return {
       assistantMessage,
-      toolMessages: toolMessages as Extract<ChatMessage, { role: 'tool' }>[],
+      toolMessages: toolMessages as ToolMessage[],
     }
   }
 
   const isAllToolCallsCompleted = (
     assistantMessage: Extract<ChatMessage, { role: 'assistant' }> & AssistantMessageWithState,
-    toolMessages: Extract<ChatMessage, { role: 'tool' }>[],
+    toolMessages: ToolMessage[],
   ): boolean => {
     // 判断所有 tool_call 是否完成：running / awaiting-approval 不算完成；缺少 status 时用 tool 消息内容兜底。
     const toolMessageMap = new Map(toolMessages.map((msg) => [msg.tool_call_id, msg]))
@@ -478,6 +493,43 @@ export const toolPlugin = (
   }
 
   let hasPausedToolCall = false
+  type PendingToolCallGroup = NonNullable<ReturnType<typeof findPendingToolCall>>
+
+  const getLivePendingToolCall = (mutate: MutateMessageStateFn): PendingToolCallGroup | null => {
+    let pendingToolCall: PendingToolCallGroup | null = null
+
+    mutate('messages', (draft, skipNotify) => {
+      pendingToolCall = findPendingToolCall(draft.messages)
+      skipNotify()
+    })
+
+    return pendingToolCall
+  }
+
+  const getToolCallStatus = (assistantMessage: AssistantMessageWithState, toolCallId: string) => {
+    return (assistantMessage.state?.toolCall as Record<string, { status?: string }> | undefined)?.[toolCallId]?.status
+  }
+
+  const appendEmptyToolMessage = (
+    toolCall: ChatCompletionMessageToolCall,
+    context: BasePluginContext & {
+      appendMessage: (message: ChatMessage | ChatMessage[]) => void
+    },
+  ): ToolMessage => {
+    const now = Math.floor(Date.now() / 1000)
+    const toolMessage = context.createMessage({
+      role: 'tool',
+      tool_call_id: toolCall.id,
+      content: '',
+      metadata: {
+        createdAt: now,
+        updatedAt: now,
+      },
+    }) as ToolMessage
+
+    context.appendMessage(toolMessage)
+    return toolMessage
+  }
 
   return {
     name: 'tool',
@@ -485,14 +537,15 @@ export const toolPlugin = (
     commands: {
       async resumeToolCall(payload, context) {
         const { toolCallId } = payload as { toolCallId: string }
-        const { getState, createMessage, appendMessage, requestNext, setRequestState } = context
+        const { requestNext, setRequestState, mutate } = context
 
-        const { assistantMessage, toolMessages } = findPendingToolCall(getState().messages) || {}
+        const pendingToolCall = getLivePendingToolCall(mutate)
 
-        if (!assistantMessage || !toolMessages) {
+        if (!pendingToolCall) {
           throw new Error('No pending tool call group found')
         }
 
+        const { assistantMessage, toolMessages } = pendingToolCall
         const toolCall = assistantMessage.tool_calls?.find((call) => call.id === toolCallId)
 
         // 无效的 toolCallId
@@ -500,9 +553,7 @@ export const toolPlugin = (
           throw new Error(`Tool call not found: ${toolCallId}`)
         }
 
-        const toolCallStatus = (assistantMessage.state?.toolCall as Record<string, { status?: string }> | undefined)?.[
-          toolCallId
-        ]?.status
+        const toolCallStatus = getToolCallStatus(assistantMessage, toolCallId)
 
         if (toolCallStatus !== 'awaiting-approval') {
           throw new Error(`Tool call is not awaiting approval: ${toolCallId}`)
@@ -510,29 +561,77 @@ export const toolPlugin = (
 
         let toolMessage = toolMessages.find((msg) => msg.tool_call_id === toolCallId)
 
-        // 此时 toolMessage 可能还没创建
         if (!toolMessage) {
-          const now = Math.floor(Date.now() / 1000)
-          const toolMsg: ChatMessage = createMessage({
-            role: 'tool',
-            tool_call_id: toolCall.id,
-            content: '',
-            metadata: {
-              createdAt: now,
-              updatedAt: now,
-            },
-          })
-
-          appendMessage(toolMsg)
-          toolMessage = toolMsg
+          toolMessage = appendEmptyToolMessage(toolCall, context)
         }
 
+        const resolvedTools = currentToolResolution ?? (await resolveTools(context))
+        currentToolResolution = resolvedTools
+        const functionToolCall = isFunctionToolCall(toolCall) ? toolCall : undefined
+        const toolSource = functionToolCall
+          ? (resolvedTools.toolSourceMap.get(functionToolCall.function.name) ?? { type: 'unknown' as const })
+          : { type: 'unknown' as const }
+
         setRequestState('processing', 'calling-tools')
-        await processToolCall(toolCall, { ...context, assistantMessage, toolMessage: toolMessage })
+        await processToolCall(
+          toolCall,
+          { ...context, assistantMessage, toolMessage: toolMessage, toolSource },
+          resolvedTools.runtimeToolMap,
+        )
 
-        const { toolMessages: newToolMessages } = findPendingToolCall(getState().messages) || {}
+        const newPendingToolCall = getLivePendingToolCall(mutate)
+        const newToolMessages = newPendingToolCall?.toolMessages ?? []
 
-        if (isAllToolCallsCompleted(assistantMessage, newToolMessages ?? [])) {
+        if (isAllToolCallsCompleted(assistantMessage, newToolMessages)) {
+          requestNext({ resume: true })
+        } else {
+          setRequestState('paused')
+        }
+      },
+      async denyToolCall(payload, context) {
+        const { toolCallId, content } = payload as { toolCallId: string; content?: string }
+        const { requestNext, setRequestState, mutate } = context
+
+        const pendingToolCall = getLivePendingToolCall(mutate)
+
+        if (!pendingToolCall) {
+          throw new Error('No pending tool call group found')
+        }
+
+        const { assistantMessage, toolMessages } = pendingToolCall
+        const toolCall = assistantMessage.tool_calls?.find((call) => call.id === toolCallId)
+
+        if (!toolCall) {
+          throw new Error(`Tool call not found: ${toolCallId}`)
+        }
+
+        const toolCallStatus = getToolCallStatus(assistantMessage, toolCallId)
+
+        if (toolCallStatus !== 'awaiting-approval') {
+          throw new Error(`Tool call is not awaiting approval: ${toolCallId}`)
+        }
+
+        let toolMessage = toolMessages.find((msg) => msg.tool_call_id === toolCallId)
+        if (!toolMessage) {
+          toolMessage = appendEmptyToolMessage(toolCall, context)
+        }
+        const deniedToolMessage = toolMessage
+
+        mutate('messages', () => {
+          const now = Math.floor(Date.now() / 1000)
+          const message = ensureToolCallState(assistantMessage, toolCall.id)
+          message.state.toolCall[toolCall.id].status = 'denied'
+          message.state.toolCall[toolCall.id].deniedAt = now
+
+          deniedToolMessage.content = content ?? toolCallDeniedContent
+          deniedToolMessage.metadata ??= {}
+          deniedToolMessage.metadata.updatedAt = now
+        })
+
+        const newPendingToolCall = getLivePendingToolCall(mutate)
+        const newToolMessages = newPendingToolCall?.toolMessages ?? []
+
+        if (isAllToolCallsCompleted(assistantMessage, newToolMessages)) {
           requestNext({ resume: true })
         } else {
           setRequestState('paused')
@@ -556,6 +655,13 @@ export const toolPlugin = (
       hasPausedToolCall = false
 
       return restOptions.onTurnResume?.(context)
+    },
+    onFinally: (context) => {
+      if (context.getState().requestState !== 'paused') {
+        currentToolResolution = undefined
+      }
+
+      return restOptions.onFinally?.(context)
     },
     onBeforeRequest: async (context) => {
       const { requestBody } = context
@@ -621,11 +727,13 @@ export const toolPlugin = (
           return
         }
 
-        return processToolCall(toolCall, contextWithToolMessage)
+        return processToolCall(toolCall, contextWithToolMessage, runtimeToolMap)
       })
 
       await Promise.all(toolCallPromises)
-      currentToolResolution = undefined
+      if (!hasPausedToolCall) {
+        currentToolResolution = undefined
+      }
 
       if (!abortSignal.aborted) {
         if (hasPausedToolCall) {

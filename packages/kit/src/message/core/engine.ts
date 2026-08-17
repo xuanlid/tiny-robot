@@ -1,5 +1,6 @@
 import { ChatCompletion, ChatCompletionChunk } from 'openai/resources'
 import { lengthPlugin, thinkingPlugin } from '../plugins'
+import { resolveRestoredRequestState } from '../toolCallState'
 import {
   BasePluginContext,
   ChatMessage,
@@ -92,6 +93,8 @@ export const createMessageEngine = (
 ): MessageEngine => {
   const {
     initialMessages = [],
+    initialRequestState = 'idle',
+    initialCustomContext = {},
     requestMessageFields = [],
     requestMessageFieldsExclude = ['state', 'metadata', 'loading'],
     responseProvider: initialResponseProvider = defaultResponseProvider,
@@ -100,7 +103,7 @@ export const createMessageEngine = (
   } = options
 
   const initialState: InternalMessageState = {
-    requestState: 'idle',
+    requestState: resolveRestoredRequestState(initialMessages, initialRequestState),
     processingState: undefined,
     messages: [...initialMessages],
   }
@@ -109,7 +112,7 @@ export const createMessageEngine = (
 
   const runtime: MessageRuntime = {
     currentTurn: [],
-    customContext: {},
+    customContext: { ...initialCustomContext },
     abortController: null,
     responseProvider: initialResponseProvider,
   }
@@ -119,6 +122,16 @@ export const createMessageEngine = (
   const pluginCommands = registerPluginCommands(plugins)
 
   const getState = () => adapter.getState()
+  const getPersistenceState = () => {
+    const state = getState()
+
+    return {
+      version: 1,
+      messages: state.messages,
+      requestState: state.requestState,
+      customContext: { ...runtime.customContext },
+    } satisfies ReturnType<MessageEngine['getPersistenceState']>
+  }
   const createMessage = <T extends ChatMessage>(message: T): T => adapter.createMessage(message)
   const subscribe = adapter.subscribe
   const mutate = adapter.mutate
@@ -220,7 +233,9 @@ export const createMessageEngine = (
   async function runTurnLifecycle(options: RunTurnLifecycleOptions = {}) {
     const ac = new AbortController()
     runtime.abortController = ac
-    runtime.customContext = {}
+    if (!options.resume) {
+      runtime.customContext = {}
+    }
     if (options.resume) {
       restoreCurrentTurnForResume()
     }
@@ -460,6 +475,20 @@ export const createMessageEngine = (
     await runTurnLifecycle()
   }
 
+  function getSendBlockedReason() {
+    const { requestState } = getState()
+
+    if (requestState === 'processing') {
+      return 'processing is in progress'
+    }
+
+    if (requestState === 'paused') {
+      return 'tool call approval is pending'
+    }
+
+    return null
+  }
+
   async function sendMessage(content: string) {
     // Validate input content
     if (!content || !content.trim()) {
@@ -467,8 +496,9 @@ export const createMessageEngine = (
       return
     }
 
-    if (getState().requestState === 'processing') {
-      console.warn('Cannot send message while processing is in progress')
+    const blockedReason = getSendBlockedReason()
+    if (blockedReason) {
+      console.warn(`Cannot send message while ${blockedReason}`)
       return
     }
 
@@ -483,9 +513,10 @@ export const createMessageEngine = (
   }
 
   async function send(...msgs: ChatMessage[]) {
-    // Validate current state - only allow sending when not processing
-    if (getState().requestState === 'processing') {
-      console.warn('Cannot send message while processing is in progress')
+    // Validate current state - only allow starting a new turn when the engine is available
+    const blockedReason = getSendBlockedReason()
+    if (blockedReason) {
+      console.warn(`Cannot send message while ${blockedReason}`)
       return
     }
 
@@ -558,7 +589,11 @@ export const createMessageEngine = (
 
     const shouldContinue = shouldRequest && !ac.signal.aborted
     if (shouldContinue) {
-      runTurnLifecycle({ resume: requestNextOptions?.resume })
+      try {
+        await runTurnLifecycle({ resume: requestNextOptions?.resume })
+      } catch (error) {
+        return { success: false, error }
+      }
     } else {
       runtime.currentTurn = []
     }
@@ -568,6 +603,7 @@ export const createMessageEngine = (
 
   return {
     getState,
+    getPersistenceState,
     subscribe,
     sendMessage,
     send,

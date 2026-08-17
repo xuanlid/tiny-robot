@@ -26,6 +26,8 @@ import {
 export const useMessage = (options: UseMessageOptions): UseMessageReturn => {
   const {
     initialMessages = [],
+    initialRequestState,
+    initialCustomContext,
     requestMessageFields = [],
     requestMessageFieldsExclude = ['state', 'metadata', 'loading'],
     plugins = [],
@@ -186,6 +188,8 @@ export const useMessage = (options: UseMessageOptions): UseMessageReturn => {
 
   const engine = createMessageEngine(adapter, {
     initialMessages: initialMessages as CoreChatMessage[],
+    initialRequestState,
+    initialCustomContext,
     requestMessageFields,
     requestMessageFieldsExclude,
     responseProvider: initialResponseProvider as CoreResponseProvider,
@@ -209,6 +213,7 @@ export const useMessage = (options: UseMessageOptions): UseMessageReturn => {
     messages: adapter.messages,
     responseProvider,
     isProcessing: adapter.isProcessing,
+    getPersistenceState: engine.getPersistenceState,
     sendMessage: engine.sendMessage,
     send: engine.send,
     abortRequest: engine.abort,

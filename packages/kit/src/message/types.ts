@@ -49,6 +49,13 @@ export interface PublicMessageState {
   isProcessing: boolean
 }
 
+export interface MessagePersistenceState {
+  version: 1
+  messages: ChatMessage[]
+  requestState?: RequestState
+  customContext?: Record<string, unknown>
+}
+
 export interface InternalMessageState {
   requestState: RequestState
   processingState?: RequestProcessingState
@@ -64,6 +71,7 @@ export interface MessageRuntime {
 
 export interface MessageEngine {
   getState(): PublicMessageState
+  getPersistenceState(): MessagePersistenceState
   subscribe(listener: (state: PublicMessageState) => void): () => void
   subscribe(kinds: MessageUpdateKinds, listener: (state: PublicMessageState) => void): () => void
   sendMessage(content: string): Promise<void>
@@ -256,6 +264,8 @@ export interface MessageEnginePlugin {
 
 export interface CreateMessageEngineOptions {
   initialMessages?: ChatMessage[]
+  initialRequestState?: RequestState
+  initialCustomContext?: Record<string, unknown>
   /**
    * 请求消息时，要包含的字段（白名单）。默认包含所有字段。
    * 如果 `requestMessageFieldsExclude` 存在，会先取 `requestMessageFields` 中的字段，再排除 `requestMessageFieldsExclude` 中的字段

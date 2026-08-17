@@ -388,6 +388,113 @@ describe('toolPlugin', () => {
     expect(fallbackCall).not.toHaveBeenCalled()
   })
 
+  it('keeps paused runtime tool handlers available when resuming', async () => {
+    const runtimeCall = vi.fn(() => 'approved runtime result')
+    const fallbackCall = vi.fn(() => 'fallback result')
+    const runtimeTool: RuntimeTool = {
+      tool: {
+        type: 'function',
+        function: {
+          name: 'approval_runtime_tool',
+          description: 'Runtime tool that needs approval',
+        },
+      },
+      handler: runtimeCall,
+    }
+    let getToolsCalls = 0
+    const responseProvider = vi.fn<ResponseProvider>(async (requestBody) => {
+      const hasToolResult = requestBody.messages.some((message) => message.role === 'tool')
+
+      if (!hasToolResult) {
+        expect(functionToolNames(requestBody.tools)).toEqual(['approval_runtime_tool'])
+
+        return {
+          id: 'paused-runtime-tool-call',
+          object: 'chat.completion',
+          created: Math.floor(Date.now() / 1000),
+          model: 'mock',
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: 'assistant',
+                content: '',
+                tool_calls: [
+                  {
+                    id: 'call-runtime-approval',
+                    type: 'function',
+                    function: {
+                      name: 'approval_runtime_tool',
+                      arguments: '{}',
+                    },
+                  },
+                ],
+              },
+              finish_reason: 'tool_calls',
+            },
+          ],
+        } as ChatCompletion
+      }
+
+      expect(requestBody.messages.at(-1)).toMatchObject({
+        role: 'tool',
+        tool_call_id: 'call-runtime-approval',
+        content: 'approved runtime result',
+      })
+
+      return {
+        id: 'final-answer',
+        object: 'chat.completion',
+        created: Math.floor(Date.now() / 1000),
+        model: 'mock',
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: 'assistant',
+              content: 'done',
+            },
+            finish_reason: 'stop',
+          },
+        ],
+      } as ChatCompletion
+    })
+
+    const engine = createTestMessageEngine({
+      plugins: [
+        ...silentDefaultPlugins,
+        toolPlugin({
+          getTools: async () => {
+            getToolsCalls++
+            return getToolsCalls === 1 ? [runtimeTool] : []
+          },
+          shouldPauseToolCall: async () => true,
+          callTool: fallbackCall,
+        }),
+      ],
+      responseProvider,
+    })
+
+    await engine.sendMessage('call approved runtime tool')
+
+    expect(engine.getState().requestState).toBe('paused')
+    expect(runtimeCall).not.toHaveBeenCalled()
+    expect(fallbackCall).not.toHaveBeenCalled()
+
+    const commandResult = await engine.runPluginCommand('tool', 'resumeToolCall', {
+      toolCallId: 'call-runtime-approval',
+    })
+
+    expect(commandResult.success).toBe(true)
+    expect(runtimeCall).toHaveBeenCalledOnce()
+    expect(fallbackCall).not.toHaveBeenCalled()
+    expect(responseProvider).toHaveBeenCalledTimes(2)
+    expect(engine.getState().messages.at(-1)).toMatchObject({
+      role: 'assistant',
+      content: 'done',
+    })
+  })
+
   it('keeps custom tools already present on the request body', async () => {
     const customTool = {
       type: 'custom',

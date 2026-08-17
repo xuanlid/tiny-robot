@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { ChatCompletionMessageToolCall } from 'openai/resources/index'
 import { createNativeMessageAdapter } from '../adapters/native'
-import { thinkingPlugin, toolPlugin } from '../plugins'
+import { createMessageRestoreOptions, parseMessageState, serializeMessageState } from '../persistence'
+import { findPendingToolCalls, thinkingPlugin, toolPlugin } from '../plugins'
 import type {
   ChatMessage,
   MessageRequestBody,
@@ -50,6 +51,68 @@ describe('createMessageEngine', () => {
     expect(s.messages).toHaveLength(1)
     expect(s.messages[0].content).toBe('hi')
     expect(s.isProcessing).toBe(false)
+  })
+
+  it('restores paused state when initial messages contain pending tool calls', () => {
+    const engine = createTestMessageEngine({
+      initialRequestState: 'idle',
+      initialMessages: [
+        { role: 'user', content: 'lookup' },
+        {
+          role: 'assistant',
+          content: '',
+          tool_calls: [createToolCall('call-pending')],
+          state: { toolCall: { 'call-pending': { status: 'awaiting-approval' } } },
+        },
+        { role: 'tool', tool_call_id: 'call-pending', content: '' },
+      ],
+      plugins: silentDefaultPlugins,
+      responseProvider: mockResponseProvider('noop'),
+    })
+
+    expect(engine.getState().requestState).toBe('paused')
+    expect(findPendingToolCalls(engine.getState().messages)).toHaveLength(1)
+  })
+
+  it('strips transient loading state from persisted and restored messages', () => {
+    const loadingMessage: ChatMessage = {
+      role: 'assistant',
+      content: 'partial answer',
+      loading: true,
+      state: { keepState: true },
+    }
+
+    const serializedState = serializeMessageState({
+      messages: [loadingMessage],
+      requestState: 'processing',
+    })
+    const parsedState = parseMessageState(
+      JSON.stringify({
+        version: 1,
+        messages: [loadingMessage],
+        requestState: 'processing',
+      }),
+    )
+    const restoreOptions = createMessageRestoreOptions({
+      version: 1,
+      messages: [loadingMessage],
+      requestState: 'processing',
+    })
+
+    expect(serializedState).not.toContain('"loading"')
+    expect(parsedState?.messages[0]).toEqual({
+      role: 'assistant',
+      content: 'partial answer',
+      state: { keepState: true },
+    })
+    expect(restoreOptions.initialMessages).toEqual([
+      {
+        role: 'assistant',
+        content: 'partial answer',
+        state: { keepState: true },
+      },
+    ])
+    expect(restoreOptions.initialRequestState).toBe('idle')
   })
 
   it('sendMessage runs responseProvider and appends assistant content', async () => {
@@ -397,6 +460,42 @@ describe('createMessageEngine', () => {
     })
   })
 
+  it('does not send new messages while paused for tool approval', async () => {
+    const callTool = vi.fn(async () => 'tool result')
+    const responseProvider = vi.fn(async () => createToolCallsCompletion([createToolCall('call-1')]))
+
+    const engine = createTestMessageEngine({
+      plugins: [
+        ...silentDefaultPlugins,
+        toolPlugin({
+          getTools: async () => [testTool],
+          shouldPauseToolCall: async () => true,
+          callTool,
+        }),
+      ],
+      responseProvider,
+    })
+
+    await engine.sendMessage('lookup')
+    expect(engine.getState().requestState).toBe('paused')
+
+    const messagesBefore = structuredClone(engine.getState().messages)
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    try {
+      await engine.sendMessage('new request')
+      await engine.send({ role: 'user', content: 'another request' })
+
+      expect(responseProvider).toHaveBeenCalledTimes(1)
+      expect(callTool).not.toHaveBeenCalled()
+      expect(engine.getState().messages).toEqual(messagesBefore)
+      expect(warnSpy).toHaveBeenCalledTimes(2)
+      expect(warnSpy).toHaveBeenCalledWith('Cannot send message while tool call approval is pending')
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
   it('resumes a paused tool call, runs callTool, and continues the model request', async () => {
     const callTool = vi.fn(async () => 'tool result')
     const responseProvider = vi
@@ -538,6 +637,9 @@ describe('createMessageEngine', () => {
     })
 
     expect(repeatedCommandResult.success).toBe(false)
+    if (repeatedCommandResult.success) {
+      throw new Error('Expected repeated resume command to fail')
+    }
     expect(repeatedCommandResult.error).toBeInstanceOf(Error)
     expect((repeatedCommandResult.error as Error).message).toBe('Tool call is not awaiting approval: call-pause-1')
     expect(engine.getState().requestState).toBe('paused')
@@ -568,18 +670,93 @@ describe('createMessageEngine', () => {
     })
   })
 
-  it('resumes a paused tool call restored from initialMessages', async () => {
+  it('denies a paused tool call and continues the model request with a tool message', async () => {
+    const callTool = vi.fn(async () => 'tool result')
+    const responseProvider = vi
+      .fn()
+      .mockResolvedValueOnce(createToolCallsCompletion([createToolCall('call-deny')]))
+      .mockImplementationOnce(async (requestBody: MessageRequestBody) => {
+        expect(requestBody.messages.at(-1)).toMatchObject({
+          role: 'tool',
+          tool_call_id: 'call-deny',
+          content: 'User denied this tool call.',
+        })
+
+        return createAssistantCompletion('continued after denial')
+      })
+
+    const engine = createTestMessageEngine({
+      plugins: [
+        ...silentDefaultPlugins,
+        toolPlugin({
+          getTools: async () => [testTool],
+          shouldPauseToolCall: async () => true,
+          toolCallDeniedContent: 'Denied by default.',
+          callTool,
+        }),
+      ],
+      responseProvider,
+    })
+
+    await engine.sendMessage('lookup')
+
+    expect(findPendingToolCalls(engine.getState().messages)).toHaveLength(1)
+
+    const commandResult = await engine.runPluginCommand('tool', 'denyToolCall', {
+      toolCallId: 'call-deny',
+      content: 'User denied this tool call.',
+    })
+
+    expect(commandResult.success).toBe(true)
+    await vi.waitFor(() => {
+      expect(responseProvider).toHaveBeenCalledTimes(2)
+      expect(engine.getState().requestState).toBe('completed')
+    })
+
+    expect(callTool).not.toHaveBeenCalled()
+    expect(engine.getState().messages[1]).toMatchObject({
+      role: 'assistant',
+      state: { toolCall: { 'call-deny': { status: 'denied' } } },
+    })
+    expect(engine.getState().messages[2]).toMatchObject({
+      role: 'tool',
+      tool_call_id: 'call-deny',
+      content: 'User denied this tool call.',
+    })
+    expect(engine.getState().messages.at(-1)).toMatchObject({
+      role: 'assistant',
+      content: 'continued after denial',
+    })
+  })
+
+  it('resumes a paused tool call restored from persisted message state', async () => {
     const restoredToolCall = createToolCall('call-restored')
-    const initialMessages: ChatMessage[] = [
-      { role: 'user', content: 'lookup after reload' },
-      {
-        role: 'assistant',
-        content: '',
-        tool_calls: [restoredToolCall],
-        state: { toolCall: { 'call-restored': { status: 'awaiting-approval' } } },
-      },
-      { role: 'tool', tool_call_id: 'call-restored', content: '' },
-    ]
+    const firstEngine = createTestMessageEngine({
+      plugins: [
+        ...silentDefaultPlugins,
+        toolPlugin({
+          getTools: async () => [testTool],
+          shouldPauseToolCall: async () => true,
+          callTool: async () => 'unexpected',
+        }),
+        {
+          name: 'persist-context',
+          onTurnStart: (context) => {
+            context.setCustomContext({ requestId: 'restored-turn' })
+          },
+        },
+      ],
+      responseProvider: async () => createToolCallsCompletion([restoredToolCall]),
+    })
+
+    await firstEngine.sendMessage('lookup after reload')
+
+    const restoredState = parseMessageState(
+      serializeMessageState({
+        ...firstEngine.getPersistenceState(),
+        requestState: 'idle',
+      }),
+    )
     const callTool = vi.fn(async () => 'restored result')
     const onTurnStart = vi.fn()
     const onTurnResume = vi.fn()
@@ -589,7 +766,7 @@ describe('createMessageEngine', () => {
     )
 
     const engine = createTestMessageEngine({
-      initialMessages,
+      ...createMessageRestoreOptions(restoredState),
       plugins: [
         ...silentDefaultPlugins,
         toolPlugin({
@@ -600,12 +777,18 @@ describe('createMessageEngine', () => {
           name: 'lifecycle-spy',
           onTurnStart,
           onTurnResume: (context) => {
+            expect(context.customContext.requestId).toBe('restored-turn')
             onTurnResume(context.currentTurn.map((message) => message.role))
           },
         },
       ],
       responseProvider,
     })
+
+    expect(restoredState?.requestState).toBe('idle')
+    expect(restoredState?.customContext).toEqual({ requestId: 'restored-turn' })
+    expect(restoredState ? findPendingToolCalls(restoredState.messages) : []).toHaveLength(1)
+    expect(engine.getState().requestState).toBe('paused')
 
     const commandResult = await engine.runPluginCommand('tool', 'resumeToolCall', { toolCallId: 'call-restored' })
 

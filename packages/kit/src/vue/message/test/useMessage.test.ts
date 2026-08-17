@@ -1,10 +1,16 @@
-import { describe, expect, it } from 'vitest'
+import { ref } from 'vue'
+import { describe, expect, it, vi } from 'vitest'
 import type { ChatMessage } from '../../../types'
+import type { SkillDefinition } from '../../../skills/types'
+import { parseMessageState, serializeMessageState } from '../../../message/persistence'
 import { mockResponseProvider, mockSequentialResponseProvider } from './helpers'
 import { lengthPlugin } from '../plugins/lengthPlugin'
-import { toolPlugin } from '../plugins/toolPlugin'
-import type { ResponseProvider } from '../types'
+import { getSkillRequestContext, skillPlugin } from '../plugins/skillPlugin'
+import { findPendingToolCalls, toolPlugin } from '../plugins/toolPlugin'
+import type { ChatCompletion, Tool, ResponseProvider } from '../types'
 import { useMessage } from '../useMessage'
+
+const functionToolNames = (tools: Tool[] = []) => tools.map((tool) => tool.function.name)
 
 describe('useMessage', () => {
   it('uses the core vue adapter while keeping the original return shape', async () => {
@@ -192,6 +198,344 @@ describe('useMessage', () => {
     })
   })
 
+  it('lets vue toolPlugin pause and resume tool calls', async () => {
+    let requestCount = 0
+    let capturedAssistantMessage: ChatMessage | undefined
+    const responseProvider: ResponseProvider = async (requestBody) => {
+      requestCount += 1
+      const hasToolResult = requestBody.messages.some((message) => message.role === 'tool' && message.content)
+
+      if (!hasToolResult) {
+        return {
+          id: 'tool-call',
+          object: 'chat.completion',
+          created: Math.floor(Date.now() / 1000),
+          model: 'mock',
+          system_fingerprint: null,
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: 'assistant',
+                content: '',
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: 'call-pause',
+                    type: 'function',
+                    function: {
+                      name: 'lookup',
+                      arguments: '{}',
+                    },
+                  },
+                ],
+              },
+              delta: undefined,
+              logprobs: null,
+              finish_reason: 'tool_calls',
+            },
+          ],
+        }
+      }
+
+      expect(requestBody.messages.at(-1)).toMatchObject({
+        role: 'tool',
+        tool_call_id: 'call-pause',
+        content: 'approved result',
+      })
+
+      return {
+        id: 'tool-answer',
+        object: 'chat.completion',
+        created: Math.floor(Date.now() / 1000),
+        model: 'mock',
+        system_fingerprint: null,
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: 'assistant',
+              content: 'done',
+            },
+            delta: undefined,
+            logprobs: null,
+            finish_reason: 'stop',
+          },
+        ],
+      }
+    }
+
+    const engine = useMessage({
+      responseProvider,
+      plugins: [
+        toolPlugin({
+          async getTools() {
+            return [
+              {
+                type: 'function',
+                function: {
+                  name: 'lookup',
+                },
+              },
+            ]
+          },
+          async shouldPauseToolCall(_toolCall, context) {
+            capturedAssistantMessage = context.assistantMessage
+            expect(context.messages.at(-1)?.role).toBe('tool')
+            return true
+          },
+          async callTool(_toolCall, context) {
+            expect(context.assistantMessage).toMatchObject({
+              role: 'assistant',
+              tool_calls: [expect.objectContaining({ id: 'call-pause' })],
+            })
+            expect(capturedAssistantMessage).toMatchObject({
+              role: 'assistant',
+              tool_calls: [expect.objectContaining({ id: 'call-pause' })],
+            })
+            return 'approved result'
+          },
+        }),
+      ],
+    })
+
+    await engine.sendMessage('ping')
+
+    expect(requestCount).toBe(1)
+    expect(engine.requestState.value).toBe('paused')
+    expect(engine.messages.value[1]).toMatchObject({
+      state: { toolCall: { 'call-pause': { status: 'awaiting-approval' } } },
+    })
+
+    const commandResult = await engine.runPluginCommand('tool', 'resumeToolCall', { toolCallId: 'call-pause' })
+
+    expect(commandResult.success).toBe(true)
+    expect(requestCount).toBe(2)
+    expect(engine.requestState.value).toBe('completed')
+    expect(engine.messages.value[2]).toMatchObject({
+      role: 'tool',
+      tool_call_id: 'call-pause',
+      content: 'approved result',
+    })
+    expect(engine.messages.value.at(-1)).toMatchObject({
+      role: 'assistant',
+      content: 'done',
+    })
+  })
+
+  it('does not send new messages while vue tool calls are paused', async () => {
+    const callTool = vi.fn(async () => 'approved result')
+    const responseProvider: ResponseProvider = vi.fn(async (): Promise<ChatCompletion> => ({
+      id: 'tool-call',
+      object: 'chat.completion',
+      created: Math.floor(Date.now() / 1000),
+      model: 'mock',
+      system_fingerprint: null,
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: 'assistant',
+            content: '',
+            tool_calls: [
+              {
+                index: 0,
+                id: 'call-pause',
+                type: 'function',
+                function: {
+                  name: 'lookup',
+                  arguments: '{}',
+                },
+              },
+            ],
+          },
+          delta: undefined,
+          logprobs: null,
+          finish_reason: 'tool_calls',
+        },
+      ],
+    }))
+
+    const engine = useMessage({
+      responseProvider,
+      plugins: [
+        toolPlugin({
+          getTools: async () => [
+            {
+              type: 'function',
+              function: {
+                name: 'lookup',
+              },
+            },
+          ],
+          shouldPauseToolCall: async () => true,
+          callTool,
+        }),
+      ],
+    })
+
+    await engine.sendMessage('ping')
+    expect(engine.requestState.value).toBe('paused')
+
+    const snapshotMessages = () => JSON.parse(JSON.stringify(engine.messages.value)) as ChatMessage[]
+    const messagesBefore = snapshotMessages()
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    try {
+      await engine.sendMessage('new request')
+      await engine.send({ role: 'user', content: 'another request' })
+
+      expect(responseProvider).toHaveBeenCalledTimes(1)
+      expect(callTool).not.toHaveBeenCalled()
+      expect(snapshotMessages()).toEqual(messagesBefore)
+      expect(warnSpy).toHaveBeenCalledTimes(2)
+      expect(warnSpy).toHaveBeenCalledWith('Cannot send message while tool call approval is pending')
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('lets vue persist pending tool calls and deny them', async () => {
+    const callTool = vi.fn(async () => 'unexpected result')
+    const responseProvider: ResponseProvider = vi.fn(async (requestBody): Promise<ChatCompletion> => {
+      const hasToolResult = requestBody.messages.some(
+        (message: ChatMessage) => message.role === 'tool' && message.content,
+      )
+
+      if (!hasToolResult) {
+        return {
+          id: 'tool-call',
+          object: 'chat.completion',
+          created: Math.floor(Date.now() / 1000),
+          model: 'mock',
+          system_fingerprint: null,
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: 'assistant',
+                content: '',
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: 'call-deny',
+                    type: 'function',
+                    function: {
+                      name: 'lookup',
+                      arguments: '{}',
+                    },
+                  },
+                ],
+              },
+              delta: undefined,
+              logprobs: null,
+              finish_reason: 'tool_calls',
+            },
+          ],
+        }
+      }
+
+      expect(requestBody.messages.at(-1)).toMatchObject({
+        role: 'tool',
+        tool_call_id: 'call-deny',
+        content: 'Denied in Vue.',
+      })
+
+      return {
+        id: 'tool-answer',
+        object: 'chat.completion',
+        created: Math.floor(Date.now() / 1000),
+        model: 'mock',
+        system_fingerprint: null,
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: 'assistant',
+              content: 'done after denial',
+            },
+            delta: undefined,
+            logprobs: null,
+            finish_reason: 'stop',
+          },
+        ],
+      }
+    })
+
+    const engine = useMessage({
+      responseProvider,
+      plugins: [
+        toolPlugin({
+          async getTools() {
+            return [
+              {
+                type: 'function',
+                function: {
+                  name: 'lookup',
+                },
+              },
+            ]
+          },
+          shouldPauseToolCall: async () => true,
+          toolCallDeniedContent: 'Denied in Vue.',
+          callTool,
+        }),
+      ],
+    })
+
+    await engine.sendMessage('ping')
+
+    const restoredState = parseMessageState(serializeMessageState(engine.getPersistenceState()))
+
+    expect(restoredState?.requestState).toBe('paused')
+    expect(findPendingToolCalls(restoredState?.messages ?? [])).toHaveLength(1)
+
+    const commandResult = await engine.runPluginCommand('tool', 'denyToolCall', { toolCallId: 'call-deny' })
+
+    expect(commandResult.success).toBe(true)
+    expect(callTool).not.toHaveBeenCalled()
+    expect(engine.requestState.value).toBe('completed')
+    expect(engine.messages.value[2]).toMatchObject({
+      role: 'tool',
+      tool_call_id: 'call-deny',
+      content: 'Denied in Vue.',
+    })
+    expect(engine.messages.value.at(-1)).toMatchObject({
+      role: 'assistant',
+      content: 'done after denial',
+    })
+  })
+
+  it('restores vue request state to paused when initial messages contain pending tool calls', () => {
+    const engine = useMessage({
+      initialRequestState: 'idle',
+      initialMessages: [
+        { role: 'user', content: 'lookup' },
+        {
+          role: 'assistant',
+          content: '',
+          tool_calls: [
+            {
+              index: 0,
+              id: 'call-pending',
+              type: 'function',
+              function: {
+                name: 'lookup',
+                arguments: '{}',
+              },
+            },
+          ],
+          state: { toolCall: { 'call-pending': { status: 'awaiting-approval' } } },
+        },
+        { role: 'tool', tool_call_id: 'call-pending', content: '' },
+      ],
+      responseProvider: mockResponseProvider('noop'),
+    })
+
+    expect(engine.requestState.value).toBe('paused')
+    expect(findPendingToolCalls(engine.messages.value)).toHaveLength(1)
+  })
+
   it('does not inject vue skill instructions by default', async () => {
     const skills = ref<SkillDefinition[]>([
       {
@@ -225,7 +569,7 @@ describe('useMessage', () => {
 
     const requestBody = responseProvider.mock.calls[0]?.[0]
     expect(requestBody.messages).toEqual([expect.objectContaining({ role: 'user', content: 'read docs' })])
-    expect(requestBody.tools?.map((tool) => tool.function.name)).toEqual(['list_skill_files', 'read_skill_file'])
+    expect(functionToolNames(requestBody.tools)).toEqual(['list_skill_files', 'read_skill_file'])
   })
 
   it('calls vue onInstructionsResolved immediately without a request body', async () => {
@@ -337,12 +681,12 @@ describe('useMessage', () => {
 
   it('uses reactive preferred skill names in auto mode', async () => {
     const preferredSkillNames = ref(['stale'])
-    const responseProvider = vi.fn((requestBody) => {
+    const responseProvider = vi.fn((requestBody, abortSignal) => {
       expect(requestBody.messages[0]).toMatchObject({
         role: 'system',
         content: expect.stringContaining('Preferred skill names: docs'),
       })
-      return mockResponseProvider('ok')(requestBody)
+      return mockResponseProvider('ok')(requestBody, abortSignal)
     })
 
     const engine = useMessage({

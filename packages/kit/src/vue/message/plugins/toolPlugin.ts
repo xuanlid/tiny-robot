@@ -1,10 +1,21 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { toolPlugin as createCoreToolPlugin } from '../../../message/plugins'
+import {
+  findPendingToolCalls as findCorePendingToolCalls,
+  toolPlugin as createCoreToolPlugin,
+} from '../../../message/plugins'
 import type { ToolProviderItem, ToolSource } from '../../../message/plugins'
+import type { PendingToolCall } from '../../../message/plugins'
+import type { ChatMessage as CoreChatMessage } from '../../../message/types'
 import { normalizeToAsyncGenerator } from '../../../message/utils'
 import type { ChatMessage, MaybePromise, MaybeStreamableResult, ToolCall } from '../../../types'
 import type { VueMessagePluginRuntime } from '../types.internal'
 import type { BasePluginContext, UseMessagePlugin } from '../types'
+
+export type { PendingToolCall } from '../../../message/plugins'
+
+export const findPendingToolCalls = (messages: ChatMessage[] | CoreChatMessage[]): PendingToolCall[] => {
+  return findCorePendingToolCalls(messages as unknown as CoreChatMessage[])
+}
 
 export interface UseMessageToolActionContext extends BasePluginContext {
   assistantMessage: ChatMessage
@@ -52,6 +63,7 @@ export const toolPlugin = (
       toolCall: ToolCall,
       context: UseMessageCallToolContext,
     ) => MaybeStreamableResult<string | Record<string, any>>
+    shouldPauseToolCall?: (toolCall: ToolCall, context: UseMessageCallToolContext) => MaybePromise<boolean>
     /**
      * 工具调用开始时的回调函数。
      * 触发时机：工具消息已创建并追加后，调用 callTool 之前触发。
@@ -82,6 +94,7 @@ export const toolPlugin = (
      * 当工具调用执行失败（抛错或拒绝）时使用的消息内容。
      */
     toolCallFailedContent?: string
+    toolCallDeniedContent?: string
     /**
      * 是否在请求前自动补充缺失的 tool 消息。
      * 当 assistant 响应了 tool_calls 但未追加对应的 tool 消息时，
@@ -94,10 +107,12 @@ export const toolPlugin = (
     getTools,
     beforeCallTools,
     callTool,
+    shouldPauseToolCall,
     onToolCallStart,
     onToolCallEnd,
     toolCallCancelledContent = 'Tool call cancelled.',
     toolCallFailedContent = 'Tool call failed.',
+    toolCallDeniedContent = 'Tool call denied.',
     autoFillMissingToolMessages = false,
     ...restOptions
   } = options
@@ -140,6 +155,23 @@ export const toolPlugin = (
             yield chunk
           }
         },
+        shouldPauseToolCall: shouldPauseToolCall
+          ? (toolCall, context) => {
+              const assistantMessage = runtime.resolveReactiveMessage(context.assistantMessage as ChatMessage)
+              const toolMessage = runtime.resolveReactiveMessage(context.toolMessage as ChatMessage)
+
+              return shouldPauseToolCall(
+                toolCall as unknown as ToolCall,
+                {
+                  ...runtime.createVueBaseContext(context),
+                  assistantMessage,
+                  currentMessage: assistantMessage,
+                  toolMessage,
+                  toolSource: context.toolSource,
+                } as UseMessageCallToolContext,
+              )
+            }
+          : undefined,
         onToolCallStart: onToolCallStart
           ? (toolCall, context) => {
               const assistantMessage = runtime.resolveReactiveMessage(context.assistantMessage as ChatMessage)
@@ -172,6 +204,7 @@ export const toolPlugin = (
           : undefined,
         toolCallCancelledContent,
         toolCallFailedContent,
+        toolCallDeniedContent,
         autoFillMissingToolMessages,
       })
     },
