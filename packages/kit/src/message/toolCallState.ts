@@ -58,6 +58,56 @@ export const hasPendingToolCalls = (messages: ChatMessage[]): boolean => {
   return findPendingToolCalls(messages).length > 0
 }
 
+export const cancelPendingToolCalls = ({
+  messages,
+  createMessage,
+  cancelledContent = 'Tool call cancelled.',
+}: {
+  messages: ChatMessage[]
+  createMessage: <T extends ChatMessage>(message: T) => T
+  cancelledContent?: string
+}): boolean => {
+  const pendingToolCalls = findPendingToolCalls(messages)
+
+  if (!pendingToolCalls.length) {
+    return false
+  }
+
+  const now = Math.floor(Date.now() / 1000)
+
+  pendingToolCalls.forEach(({ assistantMessage, toolCall, toolMessage }) => {
+    assistantMessage.state ??= {}
+    const state = assistantMessage.state as { toolCall?: Record<string, Record<string, unknown>> }
+    state.toolCall ??= {}
+    state.toolCall[toolCall.id] ??= {}
+    state.toolCall[toolCall.id].status = 'cancelled'
+    state.toolCall[toolCall.id].cancelledAt = now
+
+    if (toolMessage) {
+      if (!toolMessage.content) {
+        toolMessage.content = cancelledContent
+      }
+      toolMessage.metadata ??= {}
+      toolMessage.metadata.updatedAt = now
+      return
+    }
+
+    messages.push(
+      createMessage({
+        role: 'tool',
+        tool_call_id: toolCall.id,
+        content: cancelledContent,
+        metadata: {
+          createdAt: now,
+          updatedAt: now,
+        },
+      }),
+    )
+  })
+
+  return true
+}
+
 export const resolveRestoredRequestState = (
   messages: ChatMessage[],
   requestState: RequestState | undefined,

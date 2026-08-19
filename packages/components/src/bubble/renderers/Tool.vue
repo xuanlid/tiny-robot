@@ -20,6 +20,7 @@ const textAndIconMap = new Map<string, { text: string; icon: Component }>([
   ['success', { text: '已调用', icon: IconPlugin }],
   ['failed', { text: '调用失败', icon: IconError }],
   ['cancelled', { text: '已取消', icon: IconCancelled }],
+  ['denied', { text: '已拒绝', icon: IconCancelled }],
 ])
 
 const textAndIcon = computed(() => {
@@ -209,7 +210,8 @@ const handleClick = () => {
     }
 
     &.icon-failed,
-    &.icon-cancelled {
+    &.icon-cancelled,
+    &.icon-denied {
       color: var(--tr-color-error);
     }
   }

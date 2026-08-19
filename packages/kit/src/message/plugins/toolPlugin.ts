@@ -17,6 +17,10 @@ type AssistantMessageWithState = ChatMessage<
   { toolCall?: Record<string, Record<string, unknown>> }
 >
 type ToolMessage = Extract<ChatMessage, { role: 'tool' }>
+type ResumeToolCallPayload = {
+  toolCallId: string
+  content?: unknown
+}
 
 export type ToolSource = { type: 'toolPlugin' } | { type: 'toolProvider'; pluginName?: string } | { type: 'unknown' }
 
@@ -531,12 +535,52 @@ export const toolPlugin = (
     return toolMessage
   }
 
+  const hasOwn = (value: unknown, key: string) => {
+    return Boolean(value) && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, key)
+  }
+
+  const normalizeToolMessageContent = (content: unknown) => {
+    if (content === undefined || content === null) {
+      return ''
+    }
+
+    if (typeof content === 'string') {
+      return content
+    }
+
+    try {
+      return JSON.stringify(content)
+    } catch {
+      return String(content)
+    }
+  }
+
+  const completeToolCallWithContent = (
+    toolCall: ChatCompletionMessageToolCall,
+    context: ToolCallContext,
+    content: unknown,
+  ) => {
+    const { assistantMessage, toolMessage, mutate } = context
+    const resultToolMessage = toolMessage as ToolMessage
+
+    mutate('messages', () => {
+      const now = Math.floor(Date.now() / 1000)
+      const message = ensureToolCallState(assistantMessage, toolCall.id)
+      message.state.toolCall[toolCall.id].status = 'success'
+
+      resultToolMessage.content = normalizeToolMessageContent(content)
+      resultToolMessage.metadata ??= {}
+      resultToolMessage.metadata.updatedAt = now
+    })
+  }
+
   return {
     name: 'tool',
     ...restOptions,
     commands: {
       async resumeToolCall(payload, context) {
-        const { toolCallId } = payload as { toolCallId: string }
+        const { toolCallId, content } = payload as ResumeToolCallPayload
+        const hasDirectContent = hasOwn(payload, 'content')
         const { requestNext, setRequestState, mutate } = context
 
         const pendingToolCall = getLivePendingToolCall(mutate)
@@ -565,19 +609,27 @@ export const toolPlugin = (
           toolMessage = appendEmptyToolMessage(toolCall, context)
         }
 
-        const resolvedTools = currentToolResolution ?? (await resolveTools(context))
-        currentToolResolution = resolvedTools
-        const functionToolCall = isFunctionToolCall(toolCall) ? toolCall : undefined
-        const toolSource = functionToolCall
-          ? (resolvedTools.toolSourceMap.get(functionToolCall.function.name) ?? { type: 'unknown' as const })
-          : { type: 'unknown' as const }
+        if (hasDirectContent) {
+          completeToolCallWithContent(
+            toolCall,
+            { ...context, assistantMessage, toolMessage, toolSource: { type: 'unknown' } },
+            content,
+          )
+        } else {
+          const resolvedTools = currentToolResolution ?? (await resolveTools(context))
+          currentToolResolution = resolvedTools
+          const functionToolCall = isFunctionToolCall(toolCall) ? toolCall : undefined
+          const toolSource = functionToolCall
+            ? (resolvedTools.toolSourceMap.get(functionToolCall.function.name) ?? { type: 'unknown' as const })
+            : { type: 'unknown' as const }
 
-        setRequestState('processing', 'calling-tools')
-        await processToolCall(
-          toolCall,
-          { ...context, assistantMessage, toolMessage: toolMessage, toolSource },
-          resolvedTools.runtimeToolMap,
-        )
+          setRequestState('processing', 'calling-tools')
+          await processToolCall(
+            toolCall,
+            { ...context, assistantMessage, toolMessage: toolMessage, toolSource },
+            resolvedTools.runtimeToolMap,
+          )
+        }
 
         const newPendingToolCall = getLivePendingToolCall(mutate)
         const newToolMessages = newPendingToolCall?.toolMessages ?? []

@@ -1,6 +1,6 @@
 import { ChatCompletion, ChatCompletionChunk } from 'openai/resources'
 import { lengthPlugin, thinkingPlugin } from '../plugins'
-import { resolveRestoredRequestState } from '../toolCallState'
+import { cancelPendingToolCalls, resolveRestoredRequestState } from '../toolCallState'
 import {
   BasePluginContext,
   ChatMessage,
@@ -526,6 +526,15 @@ export const createMessageEngine = (
   }
 
   async function abort() {
+    if (getState().requestState === 'paused') {
+      mutate(['messages', 'requestState'], (draft) => {
+        cancelPendingToolCalls({ messages: draft.messages, createMessage })
+        draft.requestState = 'aborted'
+        draft.processingState = undefined
+      })
+      return
+    }
+
     runtime.abortController?.abort()
 
     // 等待直到 isProcessing 变为 false

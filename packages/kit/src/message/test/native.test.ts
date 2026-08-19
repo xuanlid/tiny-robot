@@ -71,6 +71,7 @@ describe('createMessageEngine', () => {
     })
 
     expect(engine.getState().requestState).toBe('paused')
+    expect(engine.getState().isProcessing).toBe(true)
     expect(findPendingToolCalls(engine.getState().messages)).toHaveLength(1)
   })
 
@@ -446,6 +447,7 @@ describe('createMessageEngine', () => {
 
     expect(requestState).toBe('paused')
     expect(processingState).toBeUndefined()
+    expect(engine.getState().isProcessing).toBe(true)
     expect(responseProvider).toHaveBeenCalledTimes(1)
     expect(callTool).not.toHaveBeenCalled()
     expect(assistantMessage).toMatchObject({
@@ -494,6 +496,44 @@ describe('createMessageEngine', () => {
     } finally {
       warnSpy.mockRestore()
     }
+  })
+
+  it('aborts paused tool call approval and clears processing state', async () => {
+    const callTool = vi.fn(async () => 'tool result')
+    const responseProvider = vi.fn(async () => createToolCallsCompletion([createToolCall('call-1')]))
+
+    const engine = createTestMessageEngine({
+      plugins: [
+        ...silentDefaultPlugins,
+        toolPlugin({
+          getTools: async () => [testTool],
+          shouldPauseToolCall: async () => true,
+          callTool,
+        }),
+      ],
+      responseProvider,
+    })
+
+    await engine.sendMessage('lookup')
+    expect(engine.getState().requestState).toBe('paused')
+    expect(engine.getState().isProcessing).toBe(true)
+
+    await engine.abort()
+
+    expect(engine.getState().requestState).toBe('aborted')
+    expect(engine.getState().isProcessing).toBe(false)
+    expect(findPendingToolCalls(engine.getState().messages)).toHaveLength(0)
+    expect(engine.getState().messages[1]).toMatchObject({
+      role: 'assistant',
+      state: { toolCall: { 'call-1': { status: 'cancelled' } } },
+    })
+    expect(engine.getState().messages[2]).toMatchObject({
+      role: 'tool',
+      tool_call_id: 'call-1',
+      content: 'Tool call cancelled.',
+    })
+    expect(callTool).not.toHaveBeenCalled()
+    expect(responseProvider).toHaveBeenCalledTimes(1)
   })
 
   it('resumes a paused tool call, runs callTool, and continues the model request', async () => {

@@ -303,6 +303,7 @@ describe('useMessage', () => {
 
     expect(requestCount).toBe(1)
     expect(engine.requestState.value).toBe('paused')
+    expect(engine.isProcessing.value).toBe(true)
     expect(engine.messages.value[1]).toMatchObject({
       state: { toolCall: { 'call-pause': { status: 'awaiting-approval' } } },
     })
@@ -393,6 +394,80 @@ describe('useMessage', () => {
     } finally {
       warnSpy.mockRestore()
     }
+  })
+
+  it('lets vue abort paused tool call approval', async () => {
+    const callTool = vi.fn(async () => 'unexpected result')
+    const responseProvider = vi.fn(async (): Promise<ChatCompletion> => ({
+      id: 'tool-call',
+      object: 'chat.completion',
+      created: Math.floor(Date.now() / 1000),
+      model: 'mock',
+      system_fingerprint: null,
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: 'assistant',
+            content: '',
+            tool_calls: [
+              {
+                index: 0,
+                id: 'call-abort',
+                type: 'function',
+                function: {
+                  name: 'lookup',
+                  arguments: '{}',
+                },
+              },
+            ],
+          },
+          delta: undefined,
+          logprobs: null,
+          finish_reason: 'tool_calls',
+        },
+      ],
+    }))
+
+    const engine = useMessage({
+      responseProvider,
+      plugins: [
+        toolPlugin({
+          async getTools() {
+            return [
+              {
+                type: 'function',
+                function: {
+                  name: 'lookup',
+                },
+              },
+            ]
+          },
+          shouldPauseToolCall: async () => true,
+          callTool,
+        }),
+      ],
+    })
+
+    await engine.sendMessage('ping')
+    expect(engine.requestState.value).toBe('paused')
+    expect(engine.isProcessing.value).toBe(true)
+
+    await engine.abortRequest()
+
+    expect(engine.requestState.value).toBe('aborted')
+    expect(engine.isProcessing.value).toBe(false)
+    expect(findPendingToolCalls(engine.messages.value)).toHaveLength(0)
+    expect(engine.messages.value[1]).toMatchObject({
+      state: { toolCall: { 'call-abort': { status: 'cancelled' } } },
+    })
+    expect(engine.messages.value[2]).toMatchObject({
+      role: 'tool',
+      tool_call_id: 'call-abort',
+      content: 'Tool call cancelled.',
+    })
+    expect(callTool).not.toHaveBeenCalled()
+    expect(responseProvider).toHaveBeenCalledTimes(1)
   })
 
   it('lets vue persist pending tool calls and deny them', async () => {
@@ -533,6 +608,7 @@ describe('useMessage', () => {
     })
 
     expect(engine.requestState.value).toBe('paused')
+    expect(engine.isProcessing.value).toBe(true)
     expect(findPendingToolCalls(engine.messages.value)).toHaveLength(1)
   })
 
