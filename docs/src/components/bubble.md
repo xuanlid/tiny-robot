@@ -110,6 +110,12 @@ Bubble 组件支持渲染图片内容。当 `content` 为数组且包含 `type: 
 
 > **注意**：默认情况下，组件使用 `message.content` 作为内容。如果需要自定义内容解析逻辑（例如从其他字段提取内容），可以通过 `contentResolver` 属性传入自定义函数。
 
+### AskUser
+
+当消息内容包含 `type: 'ask_user'` 的内容项时，Bubble 会使用 AskUser 渲染器展示分步确认流程。示例覆盖单选、多选、文本输入和确认步骤，并通过事件回传用户的确认结果。
+
+<demo vue="../../demos/bubble/ask-user.vue" />
+
 ### 插槽
 
 气泡组件提供了多个插槽，分别是 `prefix` 插槽, `suffix` 插槽、`content-footer` 插槽 和 `after` 插槽
