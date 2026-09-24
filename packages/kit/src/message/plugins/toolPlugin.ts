@@ -15,6 +15,7 @@ import type {
 } from '../types'
 import { combineDeltaData, makeAbortable, normalizeToAsyncGenerator } from '../utils'
 import { clearTurnSnapshot, loadTurnSnapshots, saveTurnSnapshot, serializeTurnData } from '../core/turnPersistence'
+import { createAskUserToolIntegration } from './askUserPlugin'
 
 type AssistantMessageWithState = ChatMessage<
   Record<string, unknown>,
@@ -348,6 +349,13 @@ export const toolPlugin = (
      * 插件将自动补充"工具调用已取消"的 tool 消息。默认：false。
      */
     autoFillMissingToolMessages?: boolean
+    /**
+     * 是否启用 AskUser runtime tool。启用后会自动注册 ask_user、暂停对应工具调用，
+     * 并在恢复时返回结构化答案；普通工具仍由 getTools 和 callTool 提供。
+     */
+    askUser?: boolean
+    /** AskUser 的模型提示词。仅在 askUser 为 true 时注入；未提供时使用 kit 默认提示词。 */
+    askUserPrompt?: string
   },
 ): MessageEnginePlugin => {
   const {
@@ -362,8 +370,12 @@ export const toolPlugin = (
     toolCallFailedContent = 'Tool call failed.',
     persistPausedTurn = true,
     autoFillMissingToolMessages = false,
+    askUser = false,
+    askUserPrompt,
     ...restOptions
   } = options
+
+  const askUserIntegration = askUser ? createAskUserToolIntegration({ prompt: askUserPrompt }) : undefined
 
   const inFlightToolCallIds = new Set<string>()
 
@@ -446,6 +458,7 @@ export const toolPlugin = (
   const toolCallEnd = (...args: Parameters<NonNullable<typeof onToolCallEnd>>) => {
     const [toolCall, { status, assistantMessage, mutate }] = args
     setToolCallState(assistantMessage, toolCall.id, { status }, mutate)
+    askUserIntegration?.onToolCallEnd(...args)
     onToolCallEnd?.(...args)
   }
 
@@ -701,6 +714,10 @@ export const toolPlugin = (
 
     const toolItems = [
       ...providedToolItems,
+      ...(askUserIntegration?.getTools() ?? []).map((item) => ({
+        item,
+        source: { type: 'toolPlugin' as const },
+      })),
       ...(await getTools(context)).map((item) => ({
         item,
         source: { type: 'toolPlugin' as const },
@@ -1034,7 +1051,8 @@ export const toolPlugin = (
         requestBody.tools = existingTools.length ? [...existingTools, ...tools] : tools
       }
 
-      return restOptions.onBeforeRequest?.(context)
+      await restOptions.onBeforeRequest?.(context)
+      askUserIntegration?.onBeforeRequest(context)
     },
     onAfterRequest: async (context) => {
       const {
@@ -1063,7 +1081,12 @@ export const toolPlugin = (
         })
       }
 
-      await beforeCallTools?.(currentMessage.tool_calls as ChatCompletionMessageToolCall[], {
+      const toolCalls = currentMessage.tool_calls as ChatCompletionMessageToolCall[]
+      await askUserIntegration?.beforeCallTools(toolCalls, {
+        ...context,
+        assistantMessage,
+      })
+      await beforeCallTools?.(toolCalls, {
         ...context,
         assistantMessage,
       })
@@ -1108,7 +1131,11 @@ export const toolPlugin = (
           toolSource,
         }
 
-        if (shouldPauseToolCall && (await shouldPauseToolCall(toolCall, contextWithToolMessage))) {
+        const shouldPause =
+          (askUserIntegration?.shouldPauseToolCall(toolCall) ?? false) ||
+          (shouldPauseToolCall ? await shouldPauseToolCall(toolCall, contextWithToolMessage) : false)
+
+        if (shouldPause) {
           markToolCallAwaiting(assistantMessage, toolCall.id, mutate, toolMessage)
           hasAwaitingApprovalToolCall = true
           return
