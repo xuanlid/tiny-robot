@@ -199,6 +199,7 @@ export const useMessage = (options: UseMessageOptions): UseMessageReturn => {
         onError({
           ...createVueBaseContext(context),
           error: context.error,
+          appendMessage: context.appendMessage as (message: ChatMessage | ChatMessage[]) => void,
         })
     }
 

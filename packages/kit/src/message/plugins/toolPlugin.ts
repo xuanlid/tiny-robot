@@ -14,6 +14,7 @@ import type {
   MutateMessageStateFn,
 } from '../types'
 import { combineDeltaData, makeAbortable, normalizeToAsyncGenerator } from '../utils'
+import { addRequestBodyFinalizer } from '../core/requestFinalizers'
 import { clearTurnSnapshot, loadTurnSnapshots, saveTurnSnapshot, serializeTurnData } from '../core/turnPersistence'
 import { createAskUserToolIntegration } from './askUserPlugin'
 
@@ -143,6 +144,12 @@ export type ToolCallContext = BasePluginContext & {
    * 当前工具的来源。
    */
   toolSource: ToolSource
+}
+
+export type ToolLimitExceededContext = BasePluginContext & {
+  assistantMessage: AssistantMessageWithState
+  toolRoundCount: number
+  maxToolRounds: number
 }
 
 export type ToolCallPreparationContext = BasePluginContext & {
@@ -299,6 +306,17 @@ export const toolPlugin = (
       context: ToolCallContext,
     ) => boolean | Promise<boolean>
     /**
+     * 单个用户回合允许执行的最大工具调用轮数。未设置时不限制。
+     */
+    maxToolRounds?: number
+    /**
+     * 模型返回的工具调用超过最大轮数时触发。
+     */
+    onLimitExceeded?: (
+      toolCalls: ChatCompletionMessageToolCall[],
+      context: ToolLimitExceededContext,
+    ) => MaybePromise<void>
+    /**
      * 执行单个工具调用并返回其文本结果的函数。
      */
     callTool: (
@@ -361,6 +379,8 @@ export const toolPlugin = (
   const {
     getTools,
     beforeCallTools,
+    maxToolRounds,
+    onLimitExceeded,
     shouldPauseToolCall,
     callTool,
     onToolCallStart,
@@ -374,6 +394,10 @@ export const toolPlugin = (
     askUserPrompt,
     ...restOptions
   } = options
+
+  if (maxToolRounds !== undefined && (!Number.isInteger(maxToolRounds) || maxToolRounds < 0)) {
+    throw new TypeError('maxToolRounds must be a non-negative integer')
+  }
 
   const askUserIntegration = askUser ? createAskUserToolIntegration({ prompt: askUserPrompt }) : undefined
 
@@ -420,6 +444,7 @@ export const toolPlugin = (
       turnId: context.turnId,
       requestState: 'paused',
       toolCallIds,
+      toolRoundCount,
       customContext: customContext as Record<string, unknown>,
     })
   }
@@ -493,6 +518,8 @@ export const toolPlugin = (
   }
 
   let currentToolResolution: ResolvedTools | undefined
+  let toolRoundCount = 0
+  let toolLoopMode: 'normal' | 'closing' = 'normal'
 
   const hasMeaningfulToolContent = (content: unknown) => {
     if (typeof content === 'string') {
@@ -928,6 +955,7 @@ export const toolPlugin = (
         ),
       )
       context.setCustomContext(persistedPausedTurn.customContext)
+      toolRoundCount = persistedPausedTurn.toolRoundCount ?? 0
       context.setRequestState('paused')
     },
     onTurnResume: async (context) => {
@@ -949,6 +977,10 @@ export const toolPlugin = (
       ...restOptions.commands,
     },
     onTurnStart: (context) => {
+      toolRoundCount = 0
+      toolLoopMode = 'normal'
+      currentToolResolution = undefined
+
       const { getState, createMessage, mutate } = context
       const messages = getState().messages
 
@@ -1018,6 +1050,18 @@ export const toolPlugin = (
         clearTurnSnapshot(context.turnId)
       }
 
+      if (toolLoopMode === 'closing') {
+        await restOptions.onBeforeRequest?.(context)
+        const disableTools = () => {
+          requestBody.tools = []
+          requestBody.tool_choice = 'none'
+        }
+        disableTools()
+        addRequestBodyFinalizer(requestBody, disableTools)
+        currentToolResolution = undefined
+        return
+      }
+
       const existingTools = Array.isArray(requestBody.tools) ? requestBody.tools : []
       let resolvedTools: ResolvedTools
       try {
@@ -1066,12 +1110,56 @@ export const toolPlugin = (
         createMessage,
       } = context
 
-      if (lastChoice?.finish_reason !== 'tool_calls' || !currentMessage.tool_calls?.length) {
+      const toolCalls = currentMessage.tool_calls as ChatCompletionMessageToolCall[] | undefined
+      const assistantMessage = currentMessage as AssistantMessageWithState
+
+      if (toolLoopMode === 'closing' && toolCalls?.length) {
+        throw new Error('The response provider returned tool calls after tool calling was disabled.')
+      }
+
+      if (lastChoice?.finish_reason !== 'tool_calls' || !toolCalls?.length) {
+        return restOptions.onAfterRequest?.(context)
+      }
+
+      toolRoundCount += 1
+
+      if (maxToolRounds !== undefined && toolRoundCount > maxToolRounds) {
+        const limitExceededContent = `Tool call skipped because the maximum number of tool-call rounds (${maxToolRounds}) was reached. Continue the conversation without calling tools.`
+        const cancelledCalls = toolCalls.map((toolCall) => ({
+          toolCall,
+          toolMessage: createMessage({
+            role: 'tool' as const,
+            tool_call_id: toolCall.id,
+            content: limitExceededContent,
+          }),
+        }))
+
+        appendMessage(cancelledCalls.map(({ toolMessage }) => toolMessage))
+        const toolSourceMap = currentToolResolution?.toolSourceMap ?? new Map<string, ToolSource>()
+        for (const { toolCall, toolMessage } of cancelledCalls) {
+          toolCallEnd(toolCall, {
+            ...context,
+            assistantMessage,
+            toolMessage,
+            toolSource: getToolSource(toolCall, toolSourceMap),
+            status: 'cancelled',
+          })
+        }
+
+        await onLimitExceeded?.(toolCalls, {
+          ...context,
+          assistantMessage,
+          toolRoundCount,
+          maxToolRounds,
+        })
+
+        toolLoopMode = 'closing'
+        currentToolResolution = undefined
+        requestNext()
         return restOptions.onAfterRequest?.(context)
       }
 
       setRequestState('processing', 'calling-tools')
-      const assistantMessage = currentMessage as AssistantMessageWithState
       const turnId = context.turnId
 
       if (turnId) {
@@ -1081,7 +1169,6 @@ export const toolPlugin = (
         })
       }
 
-      const toolCalls = currentMessage.tool_calls as ChatCompletionMessageToolCall[]
       await askUserIntegration?.beforeCallTools(toolCalls, {
         ...context,
         assistantMessage,
@@ -1098,7 +1185,7 @@ export const toolPlugin = (
       }
 
       let hasAwaitingApprovalToolCall = false
-      const toolCallPromises = currentMessage.tool_calls.map(async (toolCall) => {
+      const toolCallPromises = toolCalls.map(async (toolCall) => {
         const now = Math.floor(Date.now() / 1000)
         const toolMessage: ChatMessage = createMessage({
           role: 'tool',
