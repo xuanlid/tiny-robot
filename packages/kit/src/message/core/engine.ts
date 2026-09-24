@@ -24,6 +24,7 @@ import {
   pickFields,
   createTurnId,
 } from '../utils'
+import { runRequestBodyFinalizers } from './requestFinalizers'
 
 type ChatCompletionChoice = ChatCompletion.Choice | ChatCompletionChunk.Choice
 
@@ -328,19 +329,22 @@ export const createMessageEngine = (
     } catch (error) {
       setRequestState('error')
 
-      let hasOnError = false
       const context = getBaseContext(ac.signal)
+      const appendMessage = (message: ChatMessage | ChatMessage[]) => {
+        appendMessages(...(Array.isArray(message) ? message : [message]))
+      }
 
       for (const plugin of plugins.filter((plugin) => !isPluginDisabled(plugin, context))) {
         if (plugin.onError) {
-          hasOnError = true
-          plugin.onError({ ...context, error })
+          try {
+            await plugin.onError({ ...context, error, appendMessage })
+          } catch (hookError) {
+            console.error(`Error in onError hook for plugin [${plugin.name || 'Anonymous'}]:`, hookError)
+          }
         }
       }
 
-      if (!hasOnError) {
-        throw error
-      }
+      throw error
     } finally {
       const context = getBaseContext(ac.signal)
       for (const plugin of plugins.filter((plugin) => !isPluginDisabled(plugin, context))) {
@@ -508,6 +512,7 @@ export const createMessageEngine = (
     for (const plugin of plugins.filter((plugin) => !isPluginDisabled(plugin, baseContext))) {
       await plugin.onBeforeRequest?.({ ...baseContext, requestBody })
     }
+    runRequestBodyFinalizers(requestBody)
 
     // 请求前对消息进行清洗，去掉不必要的字段
     requestBody.messages = sanitizeMessages(requestBody.messages)
