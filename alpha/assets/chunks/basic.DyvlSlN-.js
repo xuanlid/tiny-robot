@@ -1,0 +1,1 @@
+import{f as e}from"./theme.Bpj42pf3.js";import{N as o,aL as t,t as n,bk as a}from"./framework.BxUN6Jop.js";const f=o({__name:"basic",setup(r){return(s,c)=>(t(),n(a(e),{content:"TinyRobot 可以帮助你构建聊天和 AI 对话界面。"}))}});export{f as default};
