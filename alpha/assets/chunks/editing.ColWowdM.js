@@ -1,0 +1,4 @@
+import{k as c}from"./theme.CIls_nk4.js";import{N as u,aL as i,v as r,w as s,I as t,J as m,bk as _,bb as p,u as f,aU as d,bR as v}from"./framework.a6p0je84.js";const k={class:"skill-editing-demo"},g={key:0,class:"skill-editing-demo__status",role:"status"},x=u({__name:"editing",setup(b){const n=d({name:"release-notes",description:"整理版本更新内容。",instructions:["# 发布说明","","列出本次版本的重要变更。","","## 输出格式","- 新增功能","- 修复问题"].join(`
+`),resources:[{path:"references/style.md",kind:"text",resourceId:"references/style.md",text:`# 写作规范
+
+使用简洁、清晰的语言。`}]}),e=d(""),l=o=>{n.value=o,e.value="已保存到当前示例状态。"};return(o,a)=>(i(),r("div",k,[a[0]||(a[0]=s("p",{class:"skill-editing-demo__hint"},[t(" 当前选中 "),s("strong",null,"SKILL.md"),t("。点击右侧文件标题栏的 "),s("strong",null,"编辑"),t("，修改后点保存；也可以先选择左侧文本资源再编辑。 ")],-1)),m(_(c),{mode:"edit",definition:n.value,onSave:l},null,8,["definition"]),e.value?(i(),r("p",g,p(e.value),1)):f("",!0)]))}}),y=v(x,[["__scopeId","data-v-4e591b14"]]);export{y as default};
