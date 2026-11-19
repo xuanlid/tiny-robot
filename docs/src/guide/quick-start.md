@@ -21,6 +21,7 @@ TinyRobot 提供官方 CLI 工具，可快速创建示例项目或向现有 Vue 
 
 - 查看 [CLI 快速接入](#cli-快速接入)
 - 查看 [CLI 详细文档](./cli-integration)
+- 在文档站或 Vue 应用中嵌入全局助手，查看 [Assistant SDK 接入](./assistant-sdk)
 
 如果你是首次体验 TinyRobot，推荐优先使用 CLI。
 :::

@@ -5,6 +5,7 @@ const sharedSidebarItems = [
     base: '/guide/',
     items: [
       { text: '快速开始', link: 'quick-start' },
+      { text: 'Assistant SDK 接入', link: 'assistant-sdk' },
       { text: '主题配置', link: 'theme-config' },
       { text: '更新日志', link: 'update-log' },
       { text: 'CLI 接入', link: 'cli-integration' },

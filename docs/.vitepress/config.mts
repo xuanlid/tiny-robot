@@ -4,9 +4,20 @@ import { defineConfig } from 'vitepress'
 import { vitepressDemoPlugin } from 'vitepress-demo-plugin'
 import { MarkdownBadgePlugin, SidebarBadgePlugin } from './plugins/badge'
 import { themeConfig } from './themeConfig'
+import { createVitePressAssistantPlugin } from '../../packages/assistant/src/vitepress-plugin'
 import { vanillaThemePlugin } from '../../packages/components/scripts/vanilla-theme.mjs'
 
 const devAlias = {
+  '@opentiny/tiny-robot-assistant/style.css': fileURLToPath(
+    new URL('../../packages/assistant/src/style.css', import.meta.url),
+  ),
+  '@opentiny/tiny-robot-assistant/vitepress': fileURLToPath(
+    new URL('../../packages/assistant/src/vitepress.ts', import.meta.url),
+  ),
+  '@opentiny/tiny-robot-assistant/vitepress-plugin': fileURLToPath(
+    new URL('../../packages/assistant/src/vitepress-plugin.ts', import.meta.url),
+  ),
+  '@opentiny/tiny-robot-assistant': fileURLToPath(new URL('../../packages/assistant/src/index.ts', import.meta.url)),
   '@opentiny/tiny-robot/vanilla/style.css': fileURLToPath(
     new URL('../../packages/components/src/vanilla/style.css', import.meta.url),
   ),
@@ -41,7 +52,9 @@ export default defineConfig({
     ],
   ],
   vite: {
-    plugins: [vueJsx(), SidebarBadgePlugin(), vanillaThemePlugin()],
+    // Load VitePress project environment files from docs/.env.local.
+    envDir: fileURLToPath(new URL('..', import.meta.url)),
+    plugins: [vueJsx(), SidebarBadgePlugin(), vanillaThemePlugin(), createVitePressAssistantPlugin()],
     server: {
       open: true,
       proxy: process.env.VP_MODE === 'development' ? { '/playground': 'http://localhost:5184' } : undefined,

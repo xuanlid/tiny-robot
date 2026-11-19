@@ -146,7 +146,13 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url)
 
   //拦截 /chat/completition 的 POST 请求
-  if (event.request.method === 'POST' && url.pathname.endsWith('chat/completions')) {
+  // Only mock the documentation site's own fallback endpoint. Do not
+  // intercept direct requests to a configured remote model provider.
+  if (
+    event.request.method === 'POST' &&
+    url.origin === self.location.origin &&
+    url.pathname.endsWith('chat/completions')
+  ) {
     event.respondWith(generateResponse(event))
   }
 })

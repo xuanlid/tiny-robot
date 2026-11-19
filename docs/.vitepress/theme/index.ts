@@ -1,6 +1,7 @@
 import { generateStore, getDefaultFiles } from '@opentiny/tiny-robot-playground/utils'
 import '@opentiny/tiny-robot-style'
 import '@opentiny/vue-theme/dark-theme-index.css'
+import { createVitePressAssistantTheme } from '@opentiny/tiny-robot-assistant/vitepress'
 import DefaultTheme from 'vitepress/theme'
 import { setupDarkModeListener } from './color-mode'
 import Layout from './Layout.vue'
@@ -13,7 +14,7 @@ declare global {
   }
 }
 
-export default {
+const theme = {
   ...DefaultTheme,
   enhanceApp({ app }) {
     // 监听暗黑模式变化
@@ -29,6 +30,8 @@ export default {
   Layout,
 }
 
+export default createVitePressAssistantTheme(theme)
+
 function registerServiceWorker() {
   if (
     typeof window === 'undefined' ||
@@ -41,8 +44,9 @@ function registerServiceWorker() {
 
   window.__SW_REGISTERED__ = true
   navigator.serviceWorker
-    .register(import.meta.env.BASE_URL + 'sw.js')
-    .then(() => {
+    .register(import.meta.env.BASE_URL + 'sw.js', { updateViaCache: 'none' })
+    .then(async (registration) => {
+      await registration.update()
       console.log('ServiceWorker registration successful')
     })
     .catch((err) => {
