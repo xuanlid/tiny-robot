@@ -16,7 +16,14 @@
     --tr-vanilla-default-font-size-xs: 12px;
     --tr-vanilla-default-font-weight-medium: 500;
     --tr-vanilla-default-text-disabled: #c2c2c2;
-    --tr-vanilla-default-color-error: #f23030
+    --tr-vanilla-default-color-error: #f23030;
+    --tr-vanilla-default-border-color-default: var(--tr-vanilla-default-text-disabled);
+    --tr-vanilla-default-color-primary: #1476ff;
+    --tr-vanilla-default-color-success: #5cb300;
+    --tr-vanilla-default-color-warning: #ff8800;
+    --tr-vanilla-default-radius-md: 8px;
+    --tr-vanilla-default-shadow-sm: 0 2px 12px rgba(0, 0, 0, 0.04);
+    --tr-vanilla-default-color-info: var(--tr-vanilla-default-color-primary)
 }
 [data-tr-vanilla][data-tr-vanilla-color-mode='dark'] {
     --tr-vanilla-default-container-bg-default: #262626;
@@ -35,5 +42,12 @@
     --tr-vanilla-default-font-size-xs: 12px;
     --tr-vanilla-default-font-weight-medium: 500;
     --tr-vanilla-default-text-disabled: #808080;
-    --tr-vanilla-default-color-error: #d94838
+    --tr-vanilla-default-color-error: #d94838;
+    --tr-vanilla-default-border-color-default: var(--tr-vanilla-default-text-disabled);
+    --tr-vanilla-default-color-primary: #5291ff;
+    --tr-vanilla-default-color-success: #5ba854;
+    --tr-vanilla-default-color-warning: #ff8800;
+    --tr-vanilla-default-radius-md: 8px;
+    --tr-vanilla-default-shadow-sm: 0 2px 12px rgba(0, 0, 0, 0.48);
+    --tr-vanilla-default-color-info: var(--tr-vanilla-default-color-primary)
 }

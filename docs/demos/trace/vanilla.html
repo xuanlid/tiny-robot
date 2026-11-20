@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Trace Vanilla Demo</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --demo-bg: #f5f7fa;
+        --demo-surface: #fff;
+        --demo-text: #222b36;
+        --demo-muted: #536171;
+        --demo-border: #cbd3dd;
+        --demo-accent: #1476ff;
+        --tr-container-bg-default: var(--demo-surface);
+        --tr-container-bg-default-2: var(--demo-bg);
+        --tr-container-bg-hover: #f0f4f8;
+        --tr-text-primary: var(--demo-text);
+        --tr-text-secondary: var(--demo-muted);
+        --tr-border-color-default: var(--demo-border);
+        --tr-color-primary: var(--demo-accent);
+      }
+
+      :root[data-theme='dark'] {
+        color-scheme: dark;
+        --demo-bg: #1b1b1f;
+        --demo-surface: #25262c;
+        --demo-text: #e4e5e9;
+        --demo-muted: #a4a7b0;
+        --demo-border: #41444d;
+        --demo-accent: #8caeff;
+        --tr-container-bg-hover: #30323a;
+      }
+
+      body {
+        margin: 0;
+        padding: 20px;
+        color: var(--demo-text);
+        font: 14px/1.5 system-ui, sans-serif;
+        background: var(--demo-bg);
+      }
+
+      main {
+        max-width: 1180px;
+        margin: 0 auto;
+      }
+
+      h1 {
+        margin: 0 0 6px;
+        font-size: 20px;
+      }
+
+      p {
+        color: var(--demo-muted);
+      }
+
+      .demo-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin: 16px 0 12px;
+      }
+
+      button {
+        cursor: pointer;
+        padding: 7px 11px;
+        border: 1px solid var(--demo-border);
+        border-radius: 6px;
+        background: var(--demo-surface);
+        color: var(--demo-text);
+        font: inherit;
+      }
+
+      button:hover {
+        border-color: var(--demo-accent);
+      }
+
+      button:focus-visible {
+        outline: 2px solid var(--demo-accent);
+        outline-offset: 2px;
+      }
+
+      #trajectory-host {
+        height: 860px;
+        min-height: 860px;
+      }
+
+      #trajectory-host .tr-trajectory {
+        height: 100%;
+        min-height: 0;
+      }
+
+      .status {
+        min-height: 1.5em;
+        color: var(--demo-muted);
+        font-size: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Trace Vanilla 轨迹面板</h1>
+      <p>点击轨迹记录打开右侧 Inspector；使用下方按钮模拟流式 Assistant、运行中的工具、工具结果和历史分页。</p>
+      <div class="demo-actions" aria-label="轨迹模拟控制">
+        <button id="new-request" type="button">开始新请求</button>
+        <button id="assistant-delta" type="button">追加 Assistant 流</button>
+        <button id="tool-start" type="button">启动工具</button>
+        <button id="tool-result" type="button">完成工具</button>
+        <button id="load-older" type="button">加载更早历史</button>
+        <button id="reset" type="button">重置</button>
+      </div>
+      <div id="event-status" class="status" aria-live="polite"></div>
+      <div id="trajectory-host"></div>
+    </main>
+
+    <script>
+      ;(async () => {
+        const root = document.documentElement
+        const systemTheme = window.matchMedia('(prefers-color-scheme: dark)')
+        let parentRoot
+        let previewUmdUrl
+        try {
+          if (window.parent !== window) {
+            parentRoot = window.parent.document.documentElement
+            previewUmdUrl = window.parent.__tinyRobotVanillaDemoUmdUrl
+          }
+        } catch {
+          // 跨源嵌入时使用系统主题。
+        }
+        const syncTheme = () => {
+          const dark = parentRoot ? parentRoot.classList.contains('dark') : systemTheme.matches
+          root.dataset.theme = dark ? 'dark' : 'light'
+        }
+        syncTheme()
+        const themeObserver = parentRoot ? new MutationObserver(syncTheme) : undefined
+        if (parentRoot) themeObserver.observe(parentRoot, { attributes: true, attributeFilter: ['class'] })
+        if (!parentRoot) systemTheme.addEventListener('change', syncTheme)
+
+        const localUmdUrl = new URL('../../../packages/components/dist/vanilla/vanilla.umd.js', document.baseURI)
+        const script = document.createElement('script')
+        script.src = previewUmdUrl ?? localUmdUrl.href
+        await new Promise((resolve, reject) => {
+          script.onload = resolve
+          script.onerror = () => reject(new Error('Trace 组件脚本加载失败'))
+          document.head.appendChild(script)
+        })
+
+        window.TinyRobotVanilla.configureVanillaTheme({
+          source: { type: 'attribute', attribute: 'data-theme' },
+        })
+
+        const status = document.querySelector('#event-status')
+        const initialEvents = [
+          {
+            sessionId: 'trajectory-demo', seq: 1, type: 'system.update', timestamp: 900,
+            turn: 1, step: 0,
+            data: { title: 'Initial system prompt', text: 'You are a helpful workspace assistant.' },
+          },
+          {
+            sessionId: 'trajectory-demo', seq: 2, type: 'user.message', timestamp: 960,
+            turn: 1, step: 0,
+            data: {
+              text: 'Inspect the workspace and summarize the result.',
+              source: 'human',
+              content: [{ type: 'text', text: 'Inspect the workspace and summarize the result.' }],
+            },
+          },
+          {
+            sessionId: 'trajectory-demo', seq: 3, type: 'context.update', timestamp: 980,
+            turn: 1, step: 0,
+            data: {
+              title: 'Session context',
+              text: 'Current directory: C:/workspace/demo · Available tools: search, read_file',
+            },
+          },
+          {
+            sessionId: 'trajectory-demo', seq: 4, type: 'request.start', timestamp: 1_000,
+            requestId: 'request-1', turn: 1, step: 1,
+            data: {
+              provider: 'deepseek', model: 'deepseek-reasoner',
+              systemPrompt: 'You are a helpful workspace assistant.',
+              prompt: [{ role: 'user', content: 'Inspect the workspace and summarize the result.' }],
+              options: { temperature: 0.2, maxTokens: 2_048 },
+            },
+          },
+          {
+            sessionId: 'trajectory-demo', seq: 5, type: 'assistant.delta', timestamp: 1_120,
+            requestId: 'request-1', turn: 1, step: 1,
+            data: { text: 'I will inspect the workspace.' },
+          },
+          {
+            sessionId: 'trajectory-demo', seq: 6, type: 'tool.start', timestamp: 1_280,
+            requestId: 'request-1', turn: 1, step: 1, callId: 'call-search',
+            data: { name: 'search', argsRaw: '{"query":"trajectory"}' },
+          },
+          {
+            sessionId: 'trajectory-demo', seq: 7, type: 'tool.start', timestamp: 1_360,
+            requestId: 'request-1', turn: 1, step: 1, callId: 'call-read-child', parentCallId: 'call-search',
+            data: { name: 'read_file', argsRaw: '{"path":"trajectory.md"}' },
+          },
+          {
+            sessionId: 'trajectory-demo', seq: 8, type: 'tool.result', timestamp: 1_550,
+            requestId: 'request-1', turn: 1, step: 1, callId: 'call-read-child', parentCallId: 'call-search',
+            data: { result: { lines: 420 }, resultText: 'trajectory.md · 420 lines' },
+          },
+          {
+            sessionId: 'trajectory-demo', seq: 9, type: 'tool.result', timestamp: 1_642,
+            requestId: 'request-1', turn: 1, step: 1, callId: 'call-search',
+            data: { result: { matches: 3 }, resultText: 'Found 3 matching files.' },
+          },
+          {
+            sessionId: 'trajectory-demo', seq: 10, type: 'assistant.end', timestamp: 1_900,
+            requestId: 'request-1', turn: 1, step: 1,
+            data: { text: 'Workspace inspection completed.' },
+          },
+          {
+            sessionId: 'trajectory-demo', seq: 11, type: 'request.end', timestamp: 1_900,
+            requestId: 'request-1', turn: 1, step: 1,
+            data: { usage: { inputTokens: 420, outputTokens: 82, reasoningTokens: 18 } },
+          },
+        ]
+
+        let sequence = 11
+        let requestIndex = 1
+        let liveTool = false
+        let olderLoaded = false
+        let instance
+        const page = {
+          events: initialEvents,
+          cursor: 'older-page-1',
+          hasMore: true,
+        }
+
+        const create = () => {
+          instance?.destroy()
+          instance = window.TinyRobotVanilla.createTrace({
+            container: document.querySelector('#trajectory-host'),
+            source: {
+              async loadInitial() {
+                return page
+              },
+              async loadOlder() {
+                if (olderLoaded) return { events: [], cursor: null, hasMore: false }
+                olderLoaded = true
+                return {
+                  events: [{
+                    sessionId: 'trajectory-demo', seq: 0, type: 'context.update', timestamp: 800,
+                    turn: 1, step: 0,
+                    data: { title: 'Loaded older context', text: 'Earlier context loaded on demand.' },
+                  }],
+                  cursor: null,
+                  hasMore: false,
+                }
+              },
+            },
+            onEvent(event) {
+              status.textContent = event.type === 'error'
+                ? `组件错误：${event.stage}`
+                : `最近事件：${event.type}`
+            },
+          })
+        }
+
+        create()
+
+        document.querySelector('#new-request').addEventListener('click', () => {
+          requestIndex += 1
+          sequence += 1
+          instance.append({
+            sessionId: 'trajectory-demo', seq: sequence, type: 'request.start', timestamp: Date.now(),
+            requestId: `request-${requestIndex}`, turn: 2, step: 1,
+            data: { provider: 'deepseek', model: 'deepseek-chat', prompt: 'Continue the inspection.' },
+          })
+          status.textContent = `Request #${requestIndex} 已开始`
+        })
+
+        document.querySelector('#assistant-delta').addEventListener('click', () => {
+          sequence += 1
+          instance.append({
+            sessionId: 'trajectory-demo', seq: sequence, type: 'assistant.delta', timestamp: Date.now(),
+            requestId: `request-${requestIndex}`, turn: 2, step: 1,
+            data: { text: ' Streaming output is updating.' },
+          })
+        })
+
+        document.querySelector('#tool-start').addEventListener('click', () => {
+          if (liveTool) return
+          liveTool = true
+          sequence += 1
+          instance.append({
+            sessionId: 'trajectory-demo', seq: sequence, type: 'tool.start', timestamp: Date.now(),
+            requestId: `request-${requestIndex}`, turn: 2, step: 1, callId: 'call-live-demo',
+            data: { name: 'read_file', argsRaw: '{"path":"README.md"}' },
+          })
+        })
+
+        document.querySelector('#tool-result').addEventListener('click', () => {
+          if (!liveTool) return
+          liveTool = false
+          sequence += 1
+          instance.append({
+            sessionId: 'trajectory-demo', seq: sequence, type: 'tool.result', timestamp: Date.now(),
+            requestId: `request-${requestIndex}`, turn: 2, step: 1, callId: 'call-live-demo',
+            data: { resultText: 'README.md loaded successfully.' },
+          })
+        })
+
+        document.querySelector('#load-older').addEventListener('click', () => {
+          void instance.loadOlder()
+        })
+
+        document.querySelector('#reset').addEventListener('click', () => {
+          sequence = 11
+          requestIndex = 1
+          liveTool = false
+          olderLoaded = false
+          create()
+        })
+
+        window.addEventListener('pagehide', () => {
+          themeObserver?.disconnect()
+          systemTheme.removeEventListener('change', syncTheme)
+          instance?.destroy()
+        }, { once: true })
+      })().catch((error) => {
+        document.querySelector('#event-status').textContent = `组件初始化失败：${error.message}`
+        console.error(error)
+      })
+    </script>
+  </body>
+</html>

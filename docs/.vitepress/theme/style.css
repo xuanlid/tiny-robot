@@ -40,9 +40,26 @@ body,
   min-height: 540px !important;
 }
 
+/* Trajectory MVP contains a full-height ledger and inspector. Keep this
+ * scoped to its explicit demo wrapper, following the QuickAssist demo style. */
+.trajectory-demo .vitepress-demo-plugin-preview {
+  height: 900px !important;
+}
+
+.trajectory-demo .vitepress-demo-plugin-preview iframe {
+  height: 900px !important;
+  min-height: 900px !important;
+}
+
 @media (max-width: 640px) {
   .VPDoc:has(h1[id='quickassist-智能帮助']) .vitepress-demo-plugin-preview iframe {
     min-height: 900px !important;
+  }
+
+  .trajectory-demo .vitepress-demo-plugin-preview,
+  .trajectory-demo .vitepress-demo-plugin-preview iframe {
+    height: 980px !important;
+    min-height: 980px !important;
   }
 }
 
